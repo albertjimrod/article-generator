@@ -53,7 +53,48 @@ For each file the script applies an instruction template with a mandatory 8-sect
 | Script | Version | Description |
 |---|---|---|
 | `generar_articulos_folders.py` | v1.0 | Original. Only `.md`, fixed engine via environment variable, basic template. |
-| `generar_articulos_mejorado.py` | v4.0 | Current version. Language selection, interactive engine selection, automatic recommendation, multi-format support, output cleanup. |
+| `generar_articulos_mejorado.py` | v6.0 | Current version. Language selection, interactive engine selection, multi-format support, Mermaid diagrams, lossless processing of large documents. |
+
+---
+
+## What's new in version 6.0
+
+### 1. Mermaid diagram support
+The script automatically detects ` ```mermaid ``` ` blocks in input files and recognises 16 diagram types:
+
+| Type | Description |
+|---|---|
+| `flowchart` / `graph` | Flow chart or graph |
+| `sequenceDiagram` | Interactions between components |
+| `classDiagram` | Object-oriented class structure |
+| `erDiagram` | Data model (entity-relationship) |
+| `gantt` | Task timeline planning |
+| `pie` | Proportional distribution |
+| `stateDiagram` | States and transitions |
+| `mindmap` | Hierarchical mind map |
+| `journey` | User experience map |
+| `gitgraph` | Git branch history |
+| `xychart-beta` | Bar/line chart |
+| `block-beta` | Block architecture |
+| `quadrantChart` | Quadrant classification |
+| `timeline` | Chronological timeline |
+| `zenuml` | ZenUML diagram |
+
+For each detected diagram the engine:
+- Keeps the `mermaid` block exactly as-is (it will render in any compatible viewer).
+- Adds an **Análisis del diagrama / Diagram analysis** paragraph immediately after, explaining the diagram's elements, relationships, and relevance to the topic.
+
+### 2. Complete content coverage
+Earlier versions could silently drop content from rich documents. v6.0 adds an explicit instruction block that:
+- Lists every heading from the original document and requires each one to be covered in the article.
+- Explicitly forbids phrases like "omitted for brevity" or "see original document".
+- Raises the output token limit to **8 192** for single-language articles and **16 384** for bilingual.
+
+### 3. Section-by-section processing for large documents
+If the input document exceeds **20 000 characters**, the script automatically splits it at `##` headings and processes each section independently. Results are then concatenated into the final article. This prevents truncation and ensures no fragment of the source is left uncovered.
+
+### 4. Extended context window
+The `num_ctx: 16384` parameter is passed on all calls, extending the engine's active context window to handle dense technical documents without losing information from earlier sections.
 
 ---
 

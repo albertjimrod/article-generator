@@ -2,7 +2,8 @@
 """
 Script mejorado para generar articulos con Ollama
 Seleccion interactiva de idioma, modelo y recomendacion por tipo de archivo
-Version: 5.0
+Soporte Mermaid, documentos extensos y cobertura completa de contenido
+Version: 6.0
 Fecha: Febrero 2026
 """
 
@@ -26,7 +27,7 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").strip("/")
 EXTENSIONES_BASE = {".md", ".txt", ".rst", ".ipynb"}
 EXTENSIONES_SOPORTADAS = EXTENSIONES_BASE | ({".pdf"} if PDF_DISPONIBLE else set())
 
-# Motor recomendado por extension (nombre exacto en Ollama)
+# Motor recomendado por extension
 RECOMENDACIONES_MODELO = {
     ".md":    ("deepseek-r1:14b",              "notas tecnicas Markdown → razonamiento profundo"),
     ".ipynb": ("deepseek-r1:14b",              "Jupyter notebooks → codigo + razonamiento"),
@@ -57,14 +58,37 @@ IDIOMAS = {
     "3": {
         "codigo":  "both",
         "nombre":  "Ambos / Both (ES + EN separados) → <dir>_procesado/es/  y  /en/",
-        "instruccion": None,   # se asigna por pasada
+        "instruccion": None,
     },
     "4": {
         "codigo":  "bilingue",
         "nombre":  "Bilingüe mejorado (ES + EN en un archivo) → <dir>_procesado/bilingue/",
-        "instruccion": None,   # gestionado por generar_articulo_bilingue_con_ollama
+        "instruccion": None,
     },
 }
+
+# ── Tipos de diagrama Mermaid reconocidos ─────────────────────────────────────
+MERMAID_TIPOS = {
+    "flowchart":       ("Diagrama de flujo",            "representa un proceso o algoritmo con nodos y flechas dirigidas"),
+    "graph":           ("Diagrama de grafo",             "representa relaciones y conexiones entre elementos"),
+    "sequencediagram": ("Diagrama de secuencia",         "representa interacciones temporales entre actores o componentes"),
+    "classdiagram":    ("Diagrama de clases",            "representa la estructura OOP: clases, atributos, metodos y herencia"),
+    "erdiagram":       ("Diagrama entidad-relacion",     "representa el modelo de datos: entidades, atributos y relaciones"),
+    "gantt":           ("Diagrama de Gantt",             "representa la planificacion temporal de tareas y fases"),
+    "pie":             ("Diagrama de tarta",             "representa la distribucion proporcional de categorias"),
+    "statediagram":    ("Diagrama de estados",           "representa los estados de un sistema y las transiciones entre ellos"),
+    "mindmap":         ("Mapa mental",                   "representa ideas organizadas en estructura jerarquica ramificada"),
+    "journey":         ("Mapa de experiencia de usuario","representa el recorrido y emociones del usuario en un proceso"),
+    "gitgraph":        ("Diagrama de ramas Git",         "representa el historial de commits y la estructura de ramas"),
+    "xychart-beta":    ("Grafico de barras/lineas",      "representa datos cuantitativos en ejes cartesianos"),
+    "block-beta":      ("Diagrama de bloques",           "representa la arquitectura o componentes de un sistema"),
+    "quadrantchart":   ("Grafico de cuadrantes",         "clasifica elementos segun dos ejes en cuatro zonas"),
+    "timeline":        ("Linea de tiempo",               "representa eventos ordenados cronologicamente"),
+    "zenuml":          ("Diagrama ZenUML",               "representa interacciones entre componentes en estilo ZenUML"),
+}
+
+# Umbral de caracteres a partir del cual se procesa por secciones
+UMBRAL_SECCIONADO = 20000
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -73,7 +97,7 @@ IDIOMAS = {
 
 def obtener_modelos_ollama():
     """Consulta la API de Ollama y devuelve la lista de modelos disponibles
-    excluyendo los de embeddings, que no sirven para generacion de texto."""
+    excluyendo los de embeddings."""
     try:
         result = subprocess.run(
             ["curl", "-s", f"{OLLAMA_HOST}/api/tags"],
@@ -116,6 +140,129 @@ def limpiar_pensamiento(texto):
     return limpio.strip()
 
 
+# ── Mermaid ───────────────────────────────────────────────────────────────────
+
+def detectar_tipo_mermaid(codigo):
+    """Detecta el tipo de diagrama Mermaid a partir de la primera linea del codigo."""
+    primera = codigo.strip().split("\n")[0].strip().lower()
+    for clave, (nombre, descripcion) in MERMAID_TIPOS.items():
+        if primera.startswith(clave):
+            return nombre, descripcion
+    return "Diagrama tecnico", "representa informacion tecnica de forma visual"
+
+
+def preprocesar_mermaid(contenido):
+    """
+    Detecta bloques ```mermaid...``` en el contenido y los anota con instrucciones
+    para que el motor:
+      1. Conserve el bloque original intacto en la salida (se renderizara correctamente).
+      2. Analice el diagrama y escriba una seccion de analisis justo despues.
+    Devuelve (contenido_anotado, numero_de_diagramas_encontrados).
+    """
+    patron = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+    contador = [0]
+
+    def anotar(match):
+        contador[0] += 1
+        n = contador[0]
+        codigo = match.group(1).strip()
+        tipo, descripcion = detectar_tipo_mermaid(codigo)
+        return (
+            f"\n\n"
+            f"[DIAGRAMA-{n} | {tipo.upper()} | {descripcion}]\n"
+            f"[INSTRUCCION OBLIGATORIA PARA EL REDACTOR — DIAGRAMA {n}:\n"
+            f" Este bloque es un {tipo} que {descripcion}.\n"
+            f" En el articulo debes:\n"
+            f"   a) Incluir el bloque ```mermaid siguiente EXACTAMENTE como esta (no lo modifiques).\n"
+            f"   b) Justo despues del bloque, añadir un parrafo titulado '**Analisis del diagrama**'\n"
+            f"      que explique: que representa, cuales son sus elementos o nodos principales,\n"
+            f"      que relaciones o flujos muestra, y por que es relevante para el tema del articulo.\n"
+            f"]\n\n"
+            f"```mermaid\n{codigo}\n```\n"
+        )
+
+    anotado = patron.sub(anotar, contenido)
+    return anotado, contador[0]
+
+
+# ── Manejo de documentos extensos ─────────────────────────────────────────────
+
+def extraer_encabezados(contenido):
+    """Extrae los encabezados Markdown del documento para asegurar cobertura completa."""
+    return re.findall(r"^#{1,3} .+", contenido, re.MULTILINE)
+
+
+def dividir_por_secciones(contenido, max_chars=18000):
+    """
+    Divide el contenido en trozos de max_chars usando los encabezados como puntos
+    de corte naturales. Si un parrafo individual supera max_chars, lo incluye entero
+    (el motor tiene tolerancia razonable).
+    """
+    partes = re.split(r"(?=\n#{1,2} )", contenido)
+    partes = [p.strip() for p in partes if p.strip()]
+
+    secciones = []
+    chunk = ""
+    for parte in partes:
+        if chunk and len(chunk) + len(parte) > max_chars:
+            secciones.append(chunk.strip())
+            chunk = parte
+        else:
+            chunk += ("\n\n" if chunk else "") + parte
+    if chunk:
+        secciones.append(chunk.strip())
+
+    return secciones if secciones else [contenido]
+
+
+# ── Llamada HTTP a Ollama (helper compartido) ──────────────────────────────────
+
+def _llamar_ollama(payload, modelo):
+    """
+    Ejecuta la llamada curl a Ollama, limpia el pensamiento si aplica
+    y devuelve el texto de respuesta limpio.
+    Lanza RuntimeError si hay fallo.
+    """
+    temp_file_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".json") as f:
+            json.dump(payload, f)
+            temp_file_path = f.name
+
+        result = subprocess.run(
+            ["curl", f"{OLLAMA_HOST}/api/chat", "-s",
+             "-H", "Content-Type: application/json",
+             "-d", f"@{temp_file_path}"],
+            check=True,
+            stdout=subprocess.PIPE
+        )
+        data = json.loads(result.stdout.decode("utf-8"))
+        output = data.get("message", {}).get("content", "").strip()
+
+        if not output:
+            raise RuntimeError("Respuesta vacia del motor")
+
+        if modelo_tiene_thinking(modelo):
+            output = limpiar_pensamiento(output)
+
+        if not output:
+            raise RuntimeError("Respuesta vacia tras eliminar el bloque de pensamiento")
+
+        return output
+
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"Error en llamada al motor: {e}")
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Menus interactivos
+# ─────────────────────────────────────────────────────────────────────────────
+
 def seleccionar_idioma():
     """Muestra el menu de seleccion de idioma de salida."""
     print("\n" + "=" * 80)
@@ -132,8 +279,7 @@ def seleccionar_idioma():
             eleccion = input(f"Elige el idioma de salida [{'/'.join(opciones_validas)}]: ").strip()
             if eleccion in IDIOMAS:
                 cfg = IDIOMAS[eleccion]
-                # Nombre limpio sin la parte de directorio para el mensaje
-                nombre_corto = cfg['nombre'].split("→")[0].strip()
+                nombre_corto = cfg["nombre"].split("→")[0].strip()
                 print(f"\n[OK] Modo seleccionado: {nombre_corto}")
                 return cfg["codigo"]
             print(f"[!] Opcion invalida. Elige {', '.join(opciones_validas)}.")
@@ -143,7 +289,7 @@ def seleccionar_idioma():
 
 
 def seleccionar_modelo(modelos_disponibles, extension_dominante):
-    """Muestra un menu interactivo para elegir el modelo de Ollama."""
+    """Muestra un menu interactivo para elegir el motor de Ollama."""
     print("\n" + "=" * 80)
     print("SELECCION DE MOTOR")
     print("=" * 80)
@@ -191,7 +337,7 @@ def seleccionar_modelo(modelos_disponibles, extension_dominante):
             idx = int(eleccion) - 1
             if 0 <= idx < len(modelos_disponibles):
                 elegido = modelos_disponibles[idx]
-                print(f"\n[OK] Modelo seleccionado: {elegido}")
+                print(f"\n[OK] Motor seleccionado: {elegido}")
                 return elegido
             else:
                 print(f"[!] Numero invalido. Elige entre 1 y {len(modelos_disponibles)}.")
@@ -203,25 +349,22 @@ def seleccionar_modelo(modelos_disponibles, extension_dominante):
             sys.exit(0)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Lectura de archivos
+# ─────────────────────────────────────────────────────────────────────────────
+
 def leer_pdf(ruta):
     """
-    Extrae el texto de un PDF con pdfplumber.
-
-    Estrategia por pagina:
-    1. Intenta extraer texto normal (PDFs con capa de texto).
-    2. Si la pagina no tiene texto, la omite con una nota (imagenes/escaneados).
-    3. Preserva las tablas como bloques Markdown.
-    4. Devuelve el contenido limpio listo para procesar.
+    Extrae el texto de un PDF con pdfplumber pagina a pagina.
+    Las tablas se convierten a Markdown. Las paginas sin texto se omiten con aviso.
     """
     partes = []
     paginas_sin_texto = 0
 
     with pdfplumber.open(ruta) as pdf:
         total_paginas = len(pdf.pages)
-        for i, pagina in enumerate(pdf.pages, 1):
-            # ── Tablas ──────────────────────────────────────────────────────
+        for pagina in pdf.pages:
             tablas = pagina.extract_tables()
-            texto_tablas = set()
             for tabla in tablas:
                 if not tabla:
                     continue
@@ -231,11 +374,8 @@ def leer_pdf(ruta):
                     filas_md.append("| " + " | ".join(celdas) + " |")
                     if j == 0:
                         filas_md.append("|" + "|".join(["---"] * len(celdas)) + "|")
-                bloque_tabla = "\n".join(filas_md)
-                partes.append(bloque_tabla)
-                texto_tablas.add(bloque_tabla)
+                partes.append("\n".join(filas_md))
 
-            # ── Texto normal (excluye zonas ya cubiertas por tablas) ─────────
             texto = pagina.extract_text(x_tolerance=3, y_tolerance=3)
             if texto and texto.strip():
                 partes.append(texto.strip())
@@ -245,16 +385,15 @@ def leer_pdf(ruta):
     if not partes:
         raise ValueError(
             f"No se pudo extraer texto del PDF '{os.path.basename(ruta)}'. "
-            f"Es posible que sea un PDF escaneado sin capa de texto OCR."
+            f"Puede ser un PDF escaneado sin capa de texto OCR."
         )
 
     aviso = ""
     if paginas_sin_texto > 0:
         aviso = (
-            f"\n\n[NOTA: {paginas_sin_texto} de {total_paginas} paginas no tenian "
-            f"capa de texto y fueron omitidas (posiblemente imagenes escaneadas).]\n\n"
+            f"\n\n[NOTA: {paginas_sin_texto} de {total_paginas} paginas "
+            f"no tenian capa de texto y fueron omitidas.]\n\n"
         )
-
     return aviso + "\n\n---\n\n".join(partes)
 
 
@@ -293,25 +432,63 @@ def construir_instruccion_idioma(codigo_idioma):
     for cfg in IDIOMAS.values():
         if cfg["codigo"] == codigo_idioma and cfg["instruccion"]:
             return cfg["instruccion"]
-    # Fallback español
     return IDIOMAS["1"]["instruccion"]
 
 
-def generar_articulo_con_ollama(contenido_md, modelo, codigo_idioma):
-    """Genera un articulo usando Ollama con el modelo e idioma seleccionados."""
+def _bloque_cobertura_completa(encabezados, n_mermaid):
+    """Construye el bloque de instrucciones de cobertura completa y Mermaid."""
+    lineas = [
+        "COBERTURA COMPLETA DEL CONTENIDO (REGLA ABSOLUTA):\n",
+        "- DEBES cubrir TODA la informacion del documento original SIN excepcion.\n",
+        "- NO resumas, NO omitas, NO simplifiques ningun concepto, dato, comando,\n",
+        "  ejemplo, configuracion, valor numerico ni resultado.\n",
+        "- Si el documento es extenso, el articulo tambien debe serlo.\n",
+        "  Es preferible un articulo largo y completo a uno corto con informacion perdida.\n",
+        "- Cada concepto, herramienta, parametro o paso del documento original\n",
+        "  debe aparecer en el articulo con su explicacion correspondiente.\n",
+        "- Los bloques de codigo deben reproducirse completos, no recortados.\n",
+    ]
+    if encabezados:
+        lineas.append(
+            f"- El documento original tiene {len(encabezados)} secciones. "
+            f"TODAS deben estar reflejadas en el articulo:\n"
+        )
+        for h in encabezados:
+            lineas.append(f"    {h}\n")
+    if n_mermaid > 0:
+        lineas += [
+            f"\nDIAGRAMAS MERMAID ({n_mermaid} encontrado(s)):\n",
+            "- Cada bloque ```mermaid debe aparecer INTACTO en el articulo (no lo modifiques).\n",
+            "- Justo despues de cada bloque mermaid, escribe un parrafo '**Analisis del diagrama**'\n",
+            "  explicando: que representa, sus elementos principales, relaciones o flujos que muestra\n",
+            "  y por que es relevante para entender el tema del articulo.\n",
+        ]
+    return "".join(lineas)
 
+
+def generar_articulo_con_ollama(contenido_md, modelo, codigo_idioma,
+                                 n_mermaid=0, encabezados=None):
+    """
+    Genera un articulo completo a partir del contenido proporcionado.
+    Parametros:
+      n_mermaid   - numero de diagramas Mermaid detectados en el contenido
+      encabezados - lista de encabezados del documento original (para cobertura completa)
+    """
     instruccion_idioma = construir_instruccion_idioma(codigo_idioma)
+    bloque_cobertura = _bloque_cobertura_completa(encabezados or [], n_mermaid)
 
     prompt_usuario = (
         "INSTRUCCION PRINCIPAL:\n"
         "Eres un redactor tecnico experto en ciencia de datos, machine learning e ingenieria de software. "
-        "Tu mision es transformar notas tecnicas desorganizadas en articulos profesionales, educativos "
-        "y altamente legibles. El resultado debe ser comparable a articulos publicados en blogs tecnico "
-        "de alto nivel (Medium, Dev.to, blogs corporativos).\n\n"
+        "Tu mision es transformar notas tecnicas en articulos profesionales, educativos y altamente legibles. "
+        "El resultado debe ser comparable a articulos publicados en blogs tecnicos de alto nivel "
+        "(Medium, Dev.to, blogs corporativos).\n\n"
+
+        + bloque_cobertura + "\n\n"
 
         "OBJETIVO FINAL:\n"
         "Crear un articulo que sea:\n"
-        "- Preciso en contenido tecnico\n"
+        "- Preciso y COMPLETO en contenido tecnico (ningun detalle del original puede faltar)\n"
         "- Accesible para nivel medio-avanzado\n"
         "- Bien estructurado y facil de seguir\n"
         "- Practico con ejemplos ejecutables\n"
@@ -326,66 +503,43 @@ def generar_articulo_con_ollama(contenido_md, modelo, codigo_idioma):
         "B) INTRODUCCION (1-2 parrafos, 150-200 palabras)\n"
         "   - Empieza con una pregunta o problema real\n"
         "   - Explica POR QUE esto es importante para el lector\n"
-        "   - Menciona el beneficio principal\n"
         "   - Anuncia lo que el lector aprendera\n\n"
 
         "C) CONCEPTOS BASICOS (si es necesario)\n"
         "   - Explica conceptos clave sin asumirlos conocidos\n"
-        "   - Usa analogias del mundo real para conceptos complejos\n"
-        "   - Secciona con headers claros\n\n"
+        "   - Usa analogias del mundo real para conceptos complejos\n\n"
 
         "D) SECCION PRACTICA PRINCIPAL\n"
         "   - Divide en pasos numerados si es procedimiento\n"
-        "   - O en subsecciones tematicas si es concepto\n"
         "   - Cada paso: Explicacion + Codigo/Ejemplo + Resultado esperado\n"
-        "   - Formato de codigo: Bloques con tres acentos grave (```bash o ```python)\n"
-        "   - Incluye comentarios en codigo explicando que hace\n\n"
+        "   - Bloques de codigo con ```bash o ```python\n"
+        "   - Comentarios en el codigo explicando cada parte\n\n"
 
         "E) EJEMPLOS PRACTICOS\n"
         "   - Minimo 2-3 ejemplos reales y diferentes\n"
         "   - Con comandos exactos que pueden copiar-pegar\n"
-        "   - Mostrar entrada, proceso, salida esperada\n"
-        "   - Advertencias de errores comunes\n\n"
+        "   - Entrada, proceso, salida esperada\n\n"
 
         "F) MEJORES PRACTICAS Y TIPS (minimo 5)\n"
-        "   - Agrupa en seccion 'Pro Tips' o 'Consideraciones Importantes'\n"
-        "   - Include rendimiento, seguridad, escalabilidad\n"
-        "   - Usa formato de vinetas\n\n"
+        "   - Rendimiento, seguridad, escalabilidad\n"
+        "   - Formato de vinetas\n\n"
 
         "G) TROUBLESHOOTING (Errores Comunes)\n"
         "   - Formato: [ERROR] | Causa | Solucion\n"
-        "   - Minimo 2-3 errores tipicos\n"
-        "   - Soluciones paso a paso\n\n"
+        "   - Minimo 2-3 errores tipicos con solucion paso a paso\n\n"
 
         "H) RESUMEN Y LLAMADO A ACCION\n"
         "   - Recapitula puntos principales (3-4 lineas)\n"
-        "   - Proximo paso logico\n"
-        "   - Invita a experimentar\n\n"
+        "   - Proximo paso logico recomendado\n\n"
 
-        "ESTILO DE ESCRITURA:\n\n"
-
-        "TONO:\n"
-        "- Profesional pero amigable (como un mentor senior)\n"
-        "- Educativo sin ser condescendiente\n"
-        "- Practico y orientado a resultados\n\n"
-
-        "FORMATO:\n"
-        "- Usa ### para subsecciones principales\n"
-        "- Usa vinetas (-) para listas\n"
-        "- Usa numeros (1. 2. 3.) solo para procedimientos con orden\n"
-        "- Usa negrita **para enfasis** en puntos clave\n"
-        "- Usa cursiva *para terminos introducidos por primera vez*\n\n"
-
-        "CRITERIOS DE CALIDAD MINIMO:\n"
-        "- Articulo de 1200-1500 palabras\n"
-        "- Minimo 2-3 bloques de codigo ejecutables\n"
-        "- Minimo 5 Pro Tips o mejores practicas\n"
-        "- Seccion de Troubleshooting con errores comunes\n"
-        "- Conclusion con proximo paso recomendado\n"
+        "ESTILO:\n"
+        "- Profesional pero amigable (mentor senior)\n"
+        "- Parrafos cortos, oraciones directas\n"
+        "- ### para subsecciones, - para listas, numeros solo para procedimientos\n"
+        "- **negrita** para enfasis, *cursiva* para terminos nuevos\n"
         "- CERO caracteres asiaticos\n\n"
 
-        "REGLAS ESPECIALES:\n\n"
-
+        "REGLAS ESPECIALES:\n"
         "SI ES TUTORIAL: numera pasos, indica tiempo estimado, requisitos previos.\n"
         "SI ES CONCEPTO: empieza con analogia, ejemplos graduados, casos de uso al final.\n"
         "SI HAY CODIGO: version simple primero, luego avanzada, explica dependencias.\n"
@@ -396,17 +550,70 @@ def generar_articulo_con_ollama(contenido_md, modelo, codigo_idioma):
         + contenido_md +
         "\n\n"
         "===========================================================================\n\n"
-        "IMPORTANTE:\n"
-        "1. Respeta la estructura de 8 secciones descrita arriba\n"
-        "2. Asegurate de alcanzar las 1200-1500 palabras\n"
-        "3. CERO caracteres asiaticos\n"
-        "4. El lector debe terminar el articulo sabiendo COMO HACER ESTO\n"
-        "5. RESPONDE DIRECTAMENTE CON EL ARTICULO, sin preambulos ni explicaciones previas\n"
-        f"6. {instruccion_idioma}\n"
-        "7. PROHIBIDO mencionar en cualquier parte del articulo que ha sido generado, "
-        "redactado, asistido o revisado por inteligencia artificial, modelos de lenguaje, "
-        "herramientas automaticas o software de ningún tipo. "
-        "El articulo debe leer como si lo hubiera escrito un experto humano.\n"
+        "IMPORTANTE — LISTA DE VERIFICACION FINAL:\n"
+        "[ ] Estructura de 8 secciones completa\n"
+        "[ ] TODA la informacion del documento original esta cubierta\n"
+        "[ ] Los bloques de codigo estan completos (no recortados)\n"
+        "[ ] Los diagramas Mermaid aparecen intactos con su analisis justo despues\n"
+        "[ ] CERO caracteres asiaticos\n"
+        "[ ] Responde DIRECTAMENTE con el articulo, sin preambulos\n"
+        f"[ ] {instruccion_idioma}\n"
+        "[ ] PROHIBIDO mencionar que el articulo fue generado, redactado o asistido "
+        "por ninguna herramienta automatica. Debe leer como escrito por un experto humano.\n"
+    )
+
+    payload = {
+        "model": modelo,
+        "messages": [{"role": "user", "content": prompt_usuario}],
+        "stream": False,
+        "options": {
+            "temperature": 0.7,
+            "num_predict": 8192,
+            "num_ctx": 16384,
+        }
+    }
+
+    try:
+        return _llamar_ollama(payload, modelo)
+    except RuntimeError as e:
+        return f"[ERROR] {e}"
+
+
+def generar_seccion_articulo(seccion_md, modelo, codigo_idioma, n_mermaid=0):
+    """
+    Desarrolla una seccion del documento de forma completa y precisa.
+    Se usa cuando el documento es demasiado extenso para procesarlo en una sola llamada.
+    NO genera estructura de articulo completo: solo desarrolla el contenido de la seccion.
+    """
+    instruccion_idioma = construir_instruccion_idioma(codigo_idioma)
+    instruccion_mermaid = ""
+    if n_mermaid > 0:
+        instruccion_mermaid = (
+            "\nDIAGRAMAS MERMAID: Si hay bloques ```mermaid en el contenido, conservalos "
+            "intactos y añade justo despues un parrafo '**Analisis del diagrama**' que explique "
+            "que representa, sus elementos principales y por que es relevante.\n"
+        )
+
+    prompt_usuario = (
+        "Eres un redactor tecnico experto. Desarrolla el siguiente contenido tecnico "
+        "de forma COMPLETA y PRECISA, convirtiendolo en texto profesional y educativo.\n\n"
+
+        "REGLAS ABSOLUTAS:\n"
+        "- Cubre TODA la informacion del contenido: ningun dato, comando, ejemplo, "
+        "configuracion ni concepto puede faltar.\n"
+        "- No resumas ni simpliques. Si el contenido tiene muchos detalles, desarrollalos todos.\n"
+        "- Los bloques de codigo deben reproducirse completos.\n"
+        "- Usa ### para subsecciones, bloques de codigo con ```, listas con -.\n"
+        + instruccion_mermaid +
+        f"- {instruccion_idioma}\n"
+        "- PROHIBIDO mencionar herramientas automaticas. Escribe como un experto humano.\n"
+        "- CERO caracteres asiaticos.\n\n"
+
+        "CONTENIDO A DESARROLLAR:\n"
+        "===========================================================================\n\n"
+        + seccion_md +
+        "\n\n===========================================================================\n\n"
+        "Responde DIRECTAMENTE con el contenido desarrollado, sin preambulos.\n"
     )
 
     payload = {
@@ -416,129 +623,124 @@ def generar_articulo_con_ollama(contenido_md, modelo, codigo_idioma):
         "options": {
             "temperature": 0.7,
             "num_predict": 4096,
+            "num_ctx": 16384,
         }
     }
 
-    temp_file_path = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".json") as temp_file:
-            json.dump(payload, temp_file)
-            temp_file_path = temp_file.name
+        return _llamar_ollama(payload, modelo)
+    except RuntimeError as e:
+        return f"[ERROR] {e}"
 
-        result = subprocess.run(
-            ["curl", f"{OLLAMA_HOST}/api/chat", "-s",
-             "-H", "Content-Type: application/json",
-             "-d", f"@{temp_file_path}"],
-            check=True,
-            stdout=subprocess.PIPE
-        )
-        data = json.loads(result.stdout.decode("utf-8"))
-        output = data.get("message", {}).get("content", "").strip()
 
-        if not output:
-            return "[ERROR] Articulo vacio"
+def generar_articulo_grande(contenido, modelo, codigo_idioma, n_mermaid, encabezados):
+    """
+    Procesa documentos extensos dividiendolos en secciones.
+    Genera intro + cuerpo por secciones + conclusion, luego los combina.
+    """
+    secciones = dividir_por_secciones(contenido)
+    n = len(secciones)
+    print(f"          Dividido en {n} secciones para procesamiento completo.")
 
-        if modelo_tiene_thinking(modelo):
-            output = limpiar_pensamiento(output)
+    partes = []
+    for i, seccion in enumerate(secciones, 1):
+        etiqueta = f"seccion {i}/{n}"
+        if i == 1:
+            etiqueta = f"introduccion + {etiqueta}"
+        if i == n:
+            etiqueta = f"{etiqueta} + conclusion"
+        print(f"          Procesando {etiqueta} ({len(seccion)} chars)...")
 
-        if not output:
-            return "[ERROR] El articulo quedo vacio tras eliminar el bloque de pensamiento"
+        # Primera seccion incluye contexto de encabezados para coherencia
+        encabezados_seccion = encabezados if i == 1 else None
+        resultado = generar_seccion_articulo(seccion, modelo, codigo_idioma, n_mermaid)
 
-        return output
+        if resultado.startswith("[ERROR]"):
+            return resultado
+        partes.append(resultado)
 
-    except Exception as e:
-        return f"[ERROR] Error generando articulo: {e}"
-    finally:
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+    # Encabezado del articulo + cuerpo completo
+    instruccion_idioma = construir_instruccion_idioma(codigo_idioma)
+    titulo_seccion = "## Contenido desarrollado" if "es" in codigo_idioma else "## Developed content"
+    return f"{titulo_seccion}\n\n" + "\n\n---\n\n".join(partes)
+
+
+def procesar_documento(contenido_raw, modelo, codigo_idioma):
+    """
+    Orquesta el procesamiento de un documento:
+    1. Pre-procesa los diagramas Mermaid.
+    2. Si el documento es pequeno: genera el articulo en una sola llamada.
+    3. Si el documento es extenso (> UMBRAL_SECCIONADO): procesa por secciones.
+    """
+    # 1. Preprocesar Mermaid
+    contenido, n_mermaid = preprocesar_mermaid(contenido_raw)
+    if n_mermaid > 0:
+        print(f"          Diagramas Mermaid detectados: {n_mermaid}")
+
+    # 2. Extraer encabezados para cobertura completa
+    encabezados = extraer_encabezados(contenido)
+
+    # 3. Estrategia segun tamaño
+    if len(contenido) <= UMBRAL_SECCIONADO:
+        return generar_articulo_con_ollama(contenido, modelo, codigo_idioma,
+                                           n_mermaid=n_mermaid, encabezados=encabezados)
+    else:
+        print(f"          Documento extenso ({len(contenido):,} chars). Procesando por secciones...")
+        return generar_articulo_grande(contenido, modelo, codigo_idioma, n_mermaid, encabezados)
 
 
 def generar_articulo_bilingue_con_ollama(contenido_md, modelo):
     """
-    Genera un articulo bilingüe mejorado en una sola llamada.
-    Devuelve un texto con la version ES completa, un separador markdown,
-    y la version EN completa. Ambas versiones son independientes y mejoradas,
-    no traducciones literales la una de la otra.
+    Genera un articulo bilingue mejorado en una sola llamada.
+    Devuelve ES completo + separador markdown + EN completo.
     """
-
     SEPARADOR = "---ENGLISH-VERSION---"
+    contenido_proc, n_mermaid = preprocesar_mermaid(contenido_md)
+    if n_mermaid > 0:
+        print(f"          Diagramas Mermaid detectados: {n_mermaid}")
+
+    encabezados = extraer_encabezados(contenido_proc)
+    bloque_cobertura = _bloque_cobertura_completa(encabezados, n_mermaid)
 
     prompt_usuario = (
         "MISION:\n"
-        "Eres un redactor tecnico senior multilingue especializado en ciencia de datos, "
-        "machine learning e ingenieria de software. A partir del contenido tecnico que se "
-        "te proporciona, crearás DOS versiones completas e independientes del mismo articulo "
-        "profesional: una en ESPAÑOL y otra en INGLES.\n\n"
+        "Eres un redactor tecnico senior multilingue. A partir del contenido tecnico que se "
+        "te proporciona, crearas DOS versiones completas e independientes del mismo articulo: "
+        "una en ESPAÑOL y otra en INGLES. Ambas son la mejor expresion del contenido en su idioma, "
+        "no traducciones literales entre si.\n\n"
 
-        "PRINCIPIO CLAVE: Cada version debe ser la mejor expresion posible del contenido "
-        "en su propio idioma. NO son traducciones literales entre si. Aprovecha el doble "
-        "pase para enriquecer ambas: si en una encuentras un ejemplo mas claro, reflejalo "
-        "en la otra. Si un termino tecnico tiene mejor explicacion en un idioma, busca el "
-        "equivalente optimo en el otro. El resultado deben ser dos articulos de maxima "
-        "calidad que un lector nativo de cada idioma percibiria como escritos por un experto.\n\n"
+        + bloque_cobertura + "\n\n"
 
-        "ESTRUCTURA DE TU RESPUESTA (OBLIGATORIA Y EXACTA):\n\n"
-        "1. Escribe la version en ESPAÑOL completa.\n"
-        "2. En una linea nueva, escribe exactamente esto (sin espacios extra):\n"
-        f"   {SEPARADOR}\n"
-        "3. Escribe la version en INGLES completa.\n\n"
+        "ESTRUCTURA DE TU RESPUESTA (OBLIGATORIA Y EXACTA):\n"
+        "1. Version completa en ESPAÑOL.\n"
+        f"2. Una linea con exactamente: {SEPARADOR}\n"
+        "3. Version completa en INGLES.\n\n"
 
-        "ESTRUCTURA DE CADA VERSION (aplicar a las dos):\n\n"
+        "ESTRUCTURA DE CADA VERSION:\n\n"
+        "A) TITULO Y SUBTITULO — atractivo, 60-70 chars\n"
+        "B) INTRODUCCION — 150-200 palabras, problema real\n"
+        "C) CONCEPTOS BASICOS — analogias del mundo real\n"
+        "D) SECCION PRACTICA — pasos + codigo + resultado esperado\n"
+        "E) EJEMPLOS PRACTICOS — minimo 2-3, entrada/proceso/salida\n"
+        "F) PRO TIPS — minimo 5, rendimiento/seguridad/escalabilidad\n"
+        "G) TROUBLESHOOTING — [ERROR] | Causa | Solucion, minimo 2-3\n"
+        "H) RESUMEN Y LLAMADO A ACCION — 3-4 puntos + proximo paso\n\n"
 
-        "A) TITULO Y SUBTITULO / TITLE AND SUBTITLE\n"
-        "   - Titulo atractivo, descriptivo, 60-70 caracteres maximo\n"
-        "   - Subtitulo: beneficio o resultado en 1 linea\n\n"
-
-        "B) INTRODUCCION / INTRODUCTION  (150-200 palabras)\n"
-        "   - Abre con un problema o pregunta real del lector\n"
-        "   - Explica POR QUE esto es importante\n"
-        "   - Anuncia lo que el lector aprendera\n\n"
-
-        "C) CONCEPTOS BASICOS / CORE CONCEPTS  (si aplica)\n"
-        "   - Explica sin asumir conocimiento previo\n"
-        "   - Usa analogias del mundo real\n\n"
-
-        "D) SECCION PRACTICA / HANDS-ON SECTION\n"
-        "   - Pasos numerados si es procedimiento, subsecciones si es concepto\n"
-        "   - Cada paso: explicacion + codigo + resultado esperado\n"
-        "   - Bloques de codigo con ```bash o ```python\n"
-        "   - Comentarios en el codigo explicando cada parte\n\n"
-
-        "E) EJEMPLOS PRACTICOS / PRACTICAL EXAMPLES\n"
-        "   - Minimo 2-3 ejemplos reales, con entrada/proceso/salida\n"
-        "   - Comandos exactos listos para copiar-pegar\n\n"
-
-        "F) MEJORES PRACTICAS / PRO TIPS  (minimo 5)\n"
-        "   - Rendimiento, seguridad, escalabilidad\n"
-        "   - Formato de viñetas\n\n"
-
-        "G) TROUBLESHOOTING / ERRORES COMUNES\n"
-        "   - Formato: [ERROR] | Causa | Solucion\n"
-        "   - Minimo 2-3 casos\n\n"
-
-        "H) RESUMEN Y LLAMADO A ACCION / SUMMARY AND CALL TO ACTION\n"
-        "   - Recapitula 3-4 puntos clave\n"
-        "   - Proximo paso recomendado\n\n"
-
-        "CRITERIOS DE CALIDAD (aplicar a CADA version por separado):\n"
-        "- 1200-1500 palabras por version\n"
+        "CRITERIOS POR VERSION:\n"
+        "- 1200-1500 palabras\n"
         "- Minimo 2-3 bloques de codigo ejecutables\n"
-        "- Minimo 5 Pro Tips\n"
-        "- Seccion de Troubleshooting con errores comunes\n"
-        "- CERO caracteres asiaticos\n"
-        "- Lenguaje natural y fluido en cada idioma (no traduccion mecanica)\n\n"
+        "- Lenguaje natural y fluido (no traduccion mecanica)\n"
+        "- CERO caracteres asiaticos\n\n"
 
-        "PROHIBIDO en ambas versiones: mencionar en ningun momento que el articulo ha sido "
-        "generado, redactado, asistido o revisado por ninguna herramienta automatica. "
-        "Ambas versiones deben leer como escritas por expertos humanos.\n\n"
+        "PROHIBIDO en ambas versiones: mencionar herramientas automaticas. "
+        "Ambas deben leer como escritas por un experto humano.\n\n"
 
-        "CONTENIDO A TRANSFORMAR:\n"
+        "CONTENIDO:\n"
         "===========================================================================\n\n"
-        + contenido_md +
+        + contenido_proc +
         "\n\n===========================================================================\n\n"
-        "RECUERDA: responde DIRECTAMENTE sin preambulos.\n"
-        "Primero la version completa en ESPAÑOL, luego exactamente la linea "
-        f"'{SEPARADOR}', luego la version completa en ENGLISH.\n"
+        "Responde DIRECTAMENTE. Primero ESPAÑOL completo, luego "
+        f"'{SEPARADOR}', luego ENGLISH completo.\n"
     )
 
     payload = {
@@ -547,57 +749,28 @@ def generar_articulo_bilingue_con_ollama(contenido_md, modelo):
         "stream": False,
         "options": {
             "temperature": 0.7,
-            "num_predict": 8192,   # doble: dos articulos completos
+            "num_predict": 16384,
+            "num_ctx": 16384,
         }
     }
 
-    temp_file_path = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".json") as temp_file:
-            json.dump(payload, temp_file)
-            temp_file_path = temp_file.name
+        output = _llamar_ollama(payload, modelo)
+    except RuntimeError as e:
+        return f"[ERROR] {e}"
 
-        result = subprocess.run(
-            ["curl", f"{OLLAMA_HOST}/api/chat", "-s",
-             "-H", "Content-Type: application/json",
-             "-d", f"@{temp_file_path}"],
-            check=True,
-            stdout=subprocess.PIPE
+    output = re.sub(
+        r"\n*" + re.escape(SEPARADOR) + r"\n*",
+        "\n\n---\n\n## English Version\n\n",
+        output
+    )
+    if "---" not in output:
+        output += (
+            "\n\n---\n\n"
+            "> **Note:** the engine did not produce a clear language separator. "
+            "The English version may not be present or may be merged with the Spanish one."
         )
-        data = json.loads(result.stdout.decode("utf-8"))
-        output = data.get("message", {}).get("content", "").strip()
-
-        if not output:
-            return "[ERROR] Articulo bilingüe vacio"
-
-        if modelo_tiene_thinking(modelo):
-            output = limpiar_pensamiento(output)
-
-        if not output:
-            return "[ERROR] Articulo bilingüe vacio tras limpiar salida"
-
-        # Normalizar el separador a markdown estandar con cabeceras visibles
-        output = re.sub(
-            r"\n*" + re.escape(SEPARADOR) + r"\n*",
-            "\n\n---\n\n## English Version\n\n",
-            output
-        )
-
-        # Si el modelo no puso el separador, añadir una nota al final
-        if "---" not in output:
-            output += (
-                "\n\n---\n\n"
-                "> **Note:** the engine did not produce a clear language separator. "
-                "The English version may not be present or may be merged with the Spanish one."
-            )
-
-        return output
-
-    except Exception as e:
-        return f"[ERROR] Error generando articulo bilingüe: {e}"
-    finally:
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+    return output
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -608,8 +781,6 @@ def procesar_en_idioma(directorio_entrada, directorio_base_salida,
                        modelo, codigo_idioma, etiqueta, num_offset=0):
     """
     Procesa todos los archivos del directorio en un idioma concreto.
-    Guarda los resultados en directorio_base_salida/<codigo_idioma>/
-
     Devuelve (total_ok, total_errores).
     """
     directorio_salida = os.path.join(directorio_base_salida, codigo_idioma)
@@ -644,7 +815,7 @@ def procesar_en_idioma(directorio_entrada, directorio_base_salida,
                     continue
 
                 start = time.time()
-                articulo = generar_articulo_con_ollama(contenido, modelo, codigo_idioma)
+                articulo = procesar_documento(contenido, modelo, codigo_idioma)
                 duracion = time.time() - start
 
                 if articulo.startswith("[ERROR]"):
@@ -656,10 +827,8 @@ def procesar_en_idioma(directorio_entrada, directorio_base_salida,
                     f.write(articulo)
 
                 palabras = len(articulo.split())
-                caracteres = len(articulo)
-
                 print(f"     [OK] -> {ruta_salida}")
-                print(f"          Tiempo: {duracion:.1f}s  |  Palabras: {palabras}  |  Chars: {caracteres}\n")
+                print(f"          Tiempo: {duracion:.1f}s  |  Palabras: {palabras}  |  Chars: {len(articulo)}\n")
                 total += 1
 
             except Exception as e:
@@ -672,7 +841,6 @@ def procesar_en_idioma(directorio_entrada, directorio_base_salida,
 def procesar_en_bilingue(directorio_entrada, directorio_base_salida, modelo, num_offset=0):
     """
     Genera articulos bilingues mejorados (ES + EN en un solo archivo).
-    Guarda los resultados en directorio_base_salida/bilingue/
     Devuelve (total_ok, total_errores).
     """
     directorio_salida = os.path.join(directorio_base_salida, "bilingue")
@@ -719,10 +887,8 @@ def procesar_en_bilingue(directorio_entrada, directorio_base_salida, modelo, num
                     f.write(articulo)
 
                 palabras = len(articulo.split())
-                caracteres = len(articulo)
-
                 print(f"     [OK] -> {ruta_salida}")
-                print(f"          Tiempo: {duracion:.1f}s  |  Palabras: {palabras}  |  Chars: {caracteres}\n")
+                print(f"          Tiempo: {duracion:.1f}s  |  Palabras: {palabras}  |  Chars: {len(articulo)}\n")
                 total += 1
 
             except Exception as e:
@@ -735,7 +901,7 @@ def procesar_en_bilingue(directorio_entrada, directorio_base_salida, modelo, num
 def procesar_archivos(directorio_entrada, directorio_base_salida, modelo, idioma):
     """
     Punto de entrada del procesamiento.
-    Si idioma == 'both', procesa dos veces: primero ES, luego EN.
+    Gestiona los cuatro modos: es, en, both, bilingue.
     """
     if not os.path.isdir(directorio_entrada):
         print(f"[ERROR] El directorio no existe: {directorio_entrada}")
@@ -744,6 +910,8 @@ def procesar_archivos(directorio_entrada, directorio_base_salida, modelo, idioma
     print(f"\nMotor activo    : {modelo}")
     print(f"Limpieza salida : {'SI' if modelo_tiene_thinking(modelo) else 'NO'}")
     print(f"Extensiones     : {', '.join(sorted(EXTENSIONES_SOPORTADAS))}")
+    print(f"Mermaid         : SI (deteccion y analisis automatico)")
+    print(f"Docs extensos   : seccionado automatico si > {UMBRAL_SECCIONADO:,} chars")
     print(f"Modo            : {idioma.upper()}")
     print(f"Salida base     : {directorio_base_salida}/")
     print("\nIniciando procesamiento...\n")
@@ -752,10 +920,7 @@ def procesar_archivos(directorio_entrada, directorio_base_salida, modelo, idioma
     errores_global = 0
 
     if idioma == "bilingue":
-        # Una sola pasada: genera ES + EN en cada archivo
-        ok, err = procesar_en_bilingue(
-            directorio_entrada, directorio_base_salida, modelo
-        )
+        ok, err = procesar_en_bilingue(directorio_entrada, directorio_base_salida, modelo)
         total_global += ok
         errores_global += err
 
@@ -811,7 +976,7 @@ if __name__ == "__main__":
     DIRECTORIO_BASE_SALIDA = f"{base_nombre}_procesado"
 
     print("=" * 80)
-    print("GENERADOR DE ARTICULOS - VERSION 5.0")
+    print("GENERADOR DE ARTICULOS - VERSION 6.0")
     print("=" * 80)
     print(f"  OLLAMA_HOST       : {OLLAMA_HOST}")
     print(f"  Directorio entrada: {DIRECTORIO_ENTRADA}")
@@ -821,13 +986,13 @@ if __name__ == "__main__":
     else:
         print(f"  Soporte PDF       : NO  →  instala con: pip install pdfplumber")
 
-    # 1. Seleccion de idioma de salida
+    # 1. Seleccion de idioma
     idioma_elegido = seleccionar_idioma()
 
     # 2. Detectar tipo de archivo predominante
     extension_dominante = detectar_extension_dominante(DIRECTORIO_ENTRADA)
 
-    # 3. Obtener motores disponibles desde Ollama
+    # 3. Obtener motores disponibles
     print("\nConsultando motores disponibles...")
     modelos = obtener_modelos_ollama()
     if not modelos:
@@ -835,7 +1000,7 @@ if __name__ == "__main__":
         sys.exit(1)
     print(f"Motores encontrados: {len(modelos)}")
 
-    # 4. Seleccion interactiva de motor
+    # 4. Seleccion de motor
     modelo_elegido = seleccionar_modelo(modelos, extension_dominante)
 
     print("\n" + "=" * 80)
