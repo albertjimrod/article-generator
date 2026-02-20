@@ -1,0 +1,23 @@
+# Directorios de salida generados
+*_procesado/
+._procesado/
+
+# Datos de entrada (notas personales)
+joplin_md/
+master/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Claude Code
+.claude/
+
+# Editor
+*.swp
+*.swo
+.DS_Store
