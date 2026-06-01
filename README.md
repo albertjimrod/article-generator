@@ -21,27 +21,28 @@ Si tienes apuntes, notas de Joplin, notebooks de Jupyter o cualquier archivo de 
 
 ## Flujo de trabajo
 
-```
-Directorio de entrada
-       │
-       ▼
-Detecta qué tipo de archivo predomina (.md, .txt, .ipynb, .rst)
-       │
-       ▼
-Consulta los motores disponibles en Ollama
-       │
-       ▼
-Sugiere el motor más adecuado según el tipo de archivo
-       │
-       ▼
-Seleccionas el idioma de salida (español, inglés o ambos)
-       │
-       ▼
-Procesa cada archivo: lee → aplica plantilla → genera artículo → limpia salida
-       │
-       ▼
-Guarda cada artículo en <directorio>_procesado/<idioma>/
-manteniendo la estructura de carpetas original
+```mermaid
+flowchart TD
+    A["📁 Directorio de entrada"] --> B["Detecta extensión predominante
+.md · .txt · .ipynb · .rst · .pdf"]
+    B --> C["Consulta motores disponibles
+en Ollama"]
+    C --> D["Sugiere motor recomendado
+según tipo de archivo"]
+    D --> E{"Seleccionas idioma
+de salida"}
+    E -->|"1 — Español"| F1["_procesado/es/"]
+    E -->|"2 — English"| F2["_procesado/en/"]
+    E -->|"3 — Ambos"| F3["_procesado/es/
+_procesado/en/"]
+    E -->|"4 — Bilingüe"| F4["_procesado/bilingue/"]
+    F1 & F2 & F3 & F4 --> G["Procesa cada archivo
+lee → plantilla → genera → limpia salida
+
+Documentos > 20.000 chars:
+divide por secciones ## y concatena"]
+    G --> H["✅ *_articulo.md
+Estructura de carpetas preservada"]
 ```
 
 Para cada archivo se aplica una plantilla de instrucciones con estructura obligatoria de 8 secciones (título, introducción, conceptos, práctica, ejemplos, pro tips, troubleshooting y conclusión) y criterios de calidad mínimos (1200-1500 palabras, bloques de código, 5+ mejores prácticas).
@@ -53,7 +54,69 @@ Para cada archivo se aplica una plantilla de instrucciones con estructura obliga
 | Script | Versión | Descripción |
 |---|---|---|
 | `generar_articulos_folders.py` | v1.0 | Original. Solo `.md`, motor fijo por variable de entorno, plantilla básica. |
-| `generar_articulos_mejorado.py` | v4.0 | Versión actual. Selección de idioma, selección interactiva de motor, recomendación automática, soporte multi-formato, limpieza de salida. |
+| `generar_articulos_mejorado.py` | v6.0 | Versión actual. Selección de idioma, motor interactivo, soporte multi-formato, diagramas Mermaid, documentos extensos sin omisión de contenido. |
+
+---
+
+## Novedades de la versión 6.0
+
+### 1. Soporte de diagramas Mermaid
+El script detecta automáticamente bloques ` ```mermaid ``` ` en los archivos de entrada y reconoce 16 tipos de diagrama:
+
+| Tipo | Descripción |
+|---|---|
+| `flowchart` / `graph` | Diagrama de flujo o grafo |
+| `sequenceDiagram` | Interacciones entre componentes |
+| `classDiagram` | Estructura orientada a objetos |
+| `erDiagram` | Modelo de datos (entidad-relación) |
+| `gantt` | Planificación temporal de tareas |
+| `pie` | Distribución proporcional |
+| `stateDiagram` | Estados y transiciones |
+| `mindmap` | Mapa mental jerárquico |
+| `journey` | Experiencia de usuario |
+| `gitgraph` | Historial de ramas Git |
+| `xychart-beta` | Gráfico de barras/líneas |
+| `block-beta` | Arquitectura en bloques |
+| `quadrantChart` | Clasificación en cuadrantes |
+| `timeline` | Línea de tiempo |
+| `zenuml` | Diagrama ZenUML |
+
+Para cada diagrama encontrado el motor:
+- Conserva el bloque `mermaid` exactamente como está (se renderizará en cualquier visor compatible).
+- Añade inmediatamente después un párrafo de **Análisis del diagrama** explicando sus elementos, relaciones y relevancia.
+
+### 2. Cobertura completa del contenido
+En versiones anteriores documentos extensos podían sufrir omisiones silenciosas. La v6.0 incluye un bloque de instrucciones explícito que:
+- Lista todos los encabezados del documento original y exige que cada uno quede cubierto en el artículo.
+- Prohíbe expresamente frases como "se omite por brevedad" o "ver documento original".
+- Aumenta el límite de tokens de salida a **8 192** para artículos individuales y **16 384** para bilingüe.
+
+### 3. Procesamiento por secciones para documentos extensos
+Si el documento de entrada supera **20 000 caracteres**, el script lo divide automáticamente en secciones usando los encabezados `##` como puntos de corte naturales. Cada sección se procesa de forma independiente y los resultados se concatenan en el artículo final. Esto evita truncados y garantiza que ningún fragmento del original quede sin tratar.
+
+```mermaid
+flowchart LR
+    DOC["📄 Documento de entrada"] --> CHECK{"> 20.000
+caracteres?"}
+    CHECK -->|"No"| SINGLE["Procesamiento directo
+token limit: 8.192"]
+    CHECK -->|"Sí"| SPLIT["Divide por encabezados ##
+n secciones"]
+    SPLIT --> P1["Sección 1
+→ LLM"]
+    SPLIT --> P2["Sección 2
+→ LLM"]
+    SPLIT --> PN["Sección n
+→ LLM"]
+    P1 & P2 & PN --> MERGE["Concatena resultados
+en orden original"]
+    SINGLE --> OUT["✅ Artículo completo
+sin omisiones"]
+    MERGE --> OUT
+```
+
+### 4. Contexto ampliado
+Se añade el parámetro `num_ctx: 16384` a todas las llamadas, ampliando la ventana de contexto activa del motor para manejar documentos técnicos densos sin perder información de las secciones anteriores.
 
 ---
 
