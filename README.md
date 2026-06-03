@@ -4,6 +4,12 @@
 
 ---
 
+<div align="center">
+  <img src=".github/assets/portfolio.png" width="100%"/>
+</div>
+
+---
+
 > [English version available → README.en.md](README.en.md)
 
 # Generador de Artículos desde Notas Técnicas
